@@ -288,17 +288,16 @@ function spawnPipe() {
     });
 }
 
-function updateBird() {
-    bird.velocity += bird.gravity;
-    bird.y += bird.velocity;
+function updateBird(delta) {
+    bird.velocity += bird.gravity * delta;
+    bird.y += bird.velocity * delta;
     bird.rotation = Math.min(Math.max(bird.velocity * 3, -25), 90);
 
-    // Ease squash/stretch back to normal
     bird.squashX += (1 - bird.squashX) * 0.2;
     bird.squashY += (1 - bird.squashY) * 0.2;
 
     if (bird.invincible) {
-        bird.invincibleTimer--;
+        bird.invincibleTimer -= delta; // was --
         if (bird.invincibleTimer <= 0) {
             bird.invincible = false;
             bird.superType = null;
@@ -320,12 +319,12 @@ function updateBird() {
     }
 }
 
-function updatePipes() {
+function updatePipes(delta) {
     const lightningBoost = bird.invincible && bird.superType === 'lightning';
     const effectiveSpawnInterval = lightningBoost ? LIGHTNING_SPAWN_INTERVAL : pipeSpawnInterval;
     const effectiveSpeed = lightningBoost ? pipeSpeed * SPEED_BOOST_MULTIPLIER : pipeSpeed;
 
-    pipeSpawnTimer++;
+    pipeSpawnTimer += delta; // was ++
     if (pipeSpawnTimer >= effectiveSpawnInterval) {
         spawnPipe();
         pipeSpawnTimer = 0;
@@ -333,11 +332,11 @@ function updatePipes() {
 
     for (let i = pipes.length - 1; i >= 0; i--) {
         const pipe = pipes[i];
-        pipe.x -= effectiveSpeed;
+        pipe.x -= effectiveSpeed * delta;
 
         // Vertical movement for special buildings
         if (pipe.moving) {
-            pipe.movePhase += pipe.moveSpeed;
+            pipe.movePhase += pipe.moveSpeed * delta;
             const offset = Math.sin(pipe.movePhase) * pipe.moveRange;
             pipe.topHeight = pipe.baseTopHeight + offset;
             pipe.bottomY = pipe.topHeight + pipeGap;
@@ -428,7 +427,7 @@ function endGame() {
     gameState = 'gameover';
     const finalScoreValue = Math.round(score);
     bestScore = Math.max(bestScore, finalScoreValue);
-    setText(finalScoreEl, `Score: ${finalScoreValue} | Best: ${bestScore} | Food Eaten: ${fedCount}`);
+    setText(finalScoreEl, `Building Score: ${finalScoreValue} | Best: ${bestScore} | Food Eaten: ${fedCount}`);
     //setText(finalScoreEl, `Score: ${finalScoreValue}  |  Best: ${bestScore}`);
     gameOverScreen.classList.remove('hidden');
 }
@@ -632,13 +631,18 @@ function draw() {
     }
 }
 
-function gameLoop() {
+let lastFrameTime = performance.now();
+
+function gameLoop(currentTime) {
+    const rawDelta = (currentTime - lastFrameTime) / (1000 / 60); // 1.0 == one 60fps frame's worth of real time
+    lastFrameTime = currentTime;
+    const delta = Math.min(rawDelta, 3); // clamp so a lag spike / tab-switch doesn't teleport the bird
+
     if (gameState === 'playing') {
-        updateBird();
-        updatePipes();
+        updateBird(delta);
+        updatePipes(delta);
     }
     draw();
     requestAnimationFrame(gameLoop);
 }
-
-gameLoop();
+requestAnimationFrame(gameLoop); // replaces the old bare gameLoop() call at the bottom of the file
