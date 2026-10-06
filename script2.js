@@ -3,17 +3,88 @@ const ctx = canvas.getContext('2d');
 const scoreEl = document.getElementById('score');
 const fedEl = document.getElementById('fedCount');
 const multiplierEl = document.getElementById('multiplier');
+const rebirthEl = document.getElementById('rebirthCount');
 const startScreen = document.getElementById('startScreen');
 const gameOverScreen = document.getElementById('gameOverScreen');
 const finalScoreEl = document.getElementById('finalScore');
+const playerNameInput = document.getElementById('playerNameInput');
+const leaderboardListEl = document.getElementById('leaderboardList');
 
 const CANVAS_W = canvas.width;
 const CANVAS_H = canvas.height;
 
-// Safe text setter — never throws if an element is missing from the HTML,
-// which is what was freezing the game loop on the first food collision.
 function setText(el, text) {
     if (el) el.textContent = text;
+}
+
+/* ============================
+   LEADERBOARD (localStorage — persists per browser/device, not shared online)
+   ============================ */
+const LEADERBOARD_KEY = 'flaffyBirdLeaderboard';
+const LAST_NAME_KEY = 'flaffyBirdLastName';
+const LEADERBOARD_MAX_ENTRIES = 10;
+
+function loadLeaderboard() {
+    try {
+        const raw = localStorage.getItem(LEADERBOARD_KEY);
+        return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+        return []; // storage blocked/corrupted — fail gracefully, never crash the game over this
+    }
+}
+
+function saveLeaderboard(entries) {
+    try {
+        localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(entries));
+    } catch (e) {
+        // storage full or disabled (e.g. private browsing) — ignore, not critical to gameplay
+    }
+}
+
+// Minimal HTML-escaping so a player name can never inject markup into the list.
+function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[ch]));
+}
+
+// Each name keeps only ITS OWN best score — an independent personal record,
+// not a running history of every attempt (per your "independent record" ask).
+function updateLeaderboard(name, finalScore, rebirths) {
+    const cleanName = (name || '').trim() || 'Anonymous';
+    const entries = loadLeaderboard();
+    const key = cleanName.toLowerCase();
+    const existingIndex = entries.findIndex(e => e.name.trim().toLowerCase() === key);
+
+    if (existingIndex >= 0) {
+        if (finalScore > entries[existingIndex].score) {
+            entries[existingIndex].score = finalScore;
+            entries[existingIndex].rebirths = rebirths;
+        }
+    } else {
+        entries.push({ name: cleanName, score: finalScore, rebirths });
+    }
+
+    entries.sort((a, b) => b.score - a.score);
+    const trimmed = entries.slice(0, LEADERBOARD_MAX_ENTRIES);
+    saveLeaderboard(trimmed);
+    return trimmed;
+}
+
+function renderLeaderboard() {
+    if (!leaderboardListEl) return;
+    const entries = loadLeaderboard();
+    if (entries.length === 0) {
+        leaderboardListEl.innerHTML = '<li class="leaderboard-empty">No scores yet — be the first!</li>';
+        return;
+    }
+    leaderboardListEl.innerHTML = entries
+        .map((e, i) => `<li><span class="lb-rank">#${i + 1}</span><span class="lb-name">${escapeHtml(e.name)}</span><span class="lb-score">${e.score}</span></li>`)
+        .join('');
 }
 
 /* ============================
@@ -50,7 +121,6 @@ const AudioEngine = (() => {
     return {
         flap: () => tone(400, 0.08, 'square', 0.12, 550),
         eatGrow: () => tone(300, 0.12, 'triangle', 0.15, 500),
-        eatShrink: () => tone(500, 0.12, 'triangle', 0.15, 280),
         eatSuper: () => {
             tone(300, 0.15, 'sawtooth', 0.15, 700);
             setTimeout(() => tone(500, 0.15, 'sawtooth', 0.12, 900), 90);
@@ -61,8 +131,23 @@ const AudioEngine = (() => {
             setTimeout(() => tone(900, 0.05, 'square', 0.12, 1200), 40);
             setTimeout(() => tone(1200, 0.08, 'square', 0.1, 1500), 80);
         },
+        rebirth: () => {
+            tone(440, 0.1, 'sine', 0.15, 660);
+            setTimeout(() => tone(660, 0.1, 'sine', 0.13, 880), 80);
+            setTimeout(() => tone(880, 0.15, 'sine', 0.12, 1320), 160);
+            setTimeout(() => tone(1320, 0.2, 'triangle', 0.1, 1760), 240);
+        },
         score: () => tone(700, 0.1, 'sine', 0.1, 900),
-        hit: () => tone(120, 0.3, 'sawtooth', 0.2, 60),
+        dieBuilding: () => {
+            tone(180, 0.1, 'square', 0.2, 60);
+            setTimeout(() => tone(140, 0.15, 'sawtooth', 0.18, 50), 60);
+            setTimeout(() => tone(90, 0.25, 'sawtooth', 0.16, 40), 130);
+        },
+        dieGround: () => {
+            tone(100, 0.08, 'sine', 0.2, 70);
+            setTimeout(() => tone(70, 0.3, 'triangle', 0.22, 35), 50);
+            setTimeout(() => tone(45, 0.35, 'sine', 0.18, 25), 150);
+        },
         bounce: () => tone(200, 0.1, 'sine', 0.12, 150),
         start: () => tone(440, 0.15, 'sine', 0.12, 660)
     };
@@ -75,9 +160,10 @@ let gameState = 'start';
 let score = 0;
 let bestScore = 0;
 let fedCount = 0;
+let rebirthCount = 0;
 let multiplier = 1.0;
-const MULTIPLIER_STEP = 0.25;
-const MULTIPLIER_MIN = 0.1; // floor so it never hits zero/negative
+let currentPlayerName = 'Anonymous';
+const MULTIPLIER_STEP = 0.1;
 
 const bird = {
     x: 80,
@@ -92,23 +178,29 @@ const bird = {
     squashY: 1,
     invincible: false,
     invincibleTimer: 0,
-    superType: null, // 'star' | 'lightning' | null
-    lightningPipesRemaining: 0 // how many more food-hits can still earn the lightning bonus
+    superType: null,
+    lightningPipesRemaining: 0
 };
 
-const MIN_BIRD_SIZE = 14;
 const MAX_BIRD_SIZE = 52;
-const GROW_AMOUNT = 3;
-const SHRINK_AMOUNT = 3;
-const SUPER_GROW_AMOUNT = 9; // star's growth effect (3x normal)
-const INVINCIBLE_DURATION = 300; // frames (~5s at 60fps) - shared by star & lightning
+// Growth slowed down (was 3 / 9) so Flaffy takes roughly twice as much junk
+// food to reach max size — he won't balloon in the first few bites anymore.
+const GROW_AMOUNT = 1.5;
+const SUPER_GROW_AMOUNT = 2.5; // kept at 3x normal, same ratio as before
+const INVINCIBLE_DURATION = 300;
 const MOVING_BUILDING_SCORE_MIN = 50;
 const MOVING_BUILDING_SCORE_MAX = 500;
 
-const SPEED_BOOST_MULTIPLIER = 2.2; // how much faster pipes move during lightning
-const LIGHTNING_SPAWN_INTERVAL = 45; // faster spawn rate during lightning (vs normal 90)
-const LIGHTNING_GUARANTEED_PIPES = 5; // max number of food-hits that can earn the bonus in one window
-const LIGHTNING_BONUS_POINTS = 5; // raw points per bonus-eligible hit, before multiplier
+const SPEED_BOOST_MULTIPLIER = 2.2;
+const LIGHTNING_SPAWN_INTERVAL = 45;
+const LIGHTNING_GUARANTEED_PIPES = 5;
+const LIGHTNING_BONUS_POINTS = 5;
+const FOOD_BASE_POINTS = 1;
+
+const REBIRTH_SCORE_INTERVAL = 30;
+const REBIRTH_BONUS_POINTS = 15; // must stay < REBIRTH_SCORE_INTERVAL — see checkRebirth() note
+const REBIRTH_SAFETY_CAP = 20;
+let rebirthThreshold = REBIRTH_SCORE_INTERVAL;
 
 const FOOD_TYPES = [
     { emoji: '🍕', effect: 'grow' },
@@ -117,17 +209,11 @@ const FOOD_TYPES = [
     { emoji: '🍗', effect: 'grow' },
     { emoji: '🧁', effect: 'grow' },
     { emoji: '🌭', effect: 'grow' },
-    { emoji: '🍪', effect: 'grow' },
-    { emoji: '🍎', effect: 'shrink' },
-    { emoji: '🥦', effect: 'shrink' },
-    { emoji: '🥕', effect: 'shrink' },
-    { emoji: '🍇', effect: 'shrink' },
-    { emoji: '🥬', effect: 'shrink' },
-    { emoji: '🍋', effect: 'shrink' }
+    { emoji: '🍪', effect: 'grow' }
 ];
 
-const SUPER_FOOD_CHANCE = 0.12; // 12% chance a spawned food is "super"
-const LIGHTNING_CHANCE_WITHIN_SUPER = 0.35; // of that 12%, only 35% is lightning (~4.2% overall) — lower than star (~7.8% overall)
+const SUPER_FOOD_CHANCE = 0.12;
+const LIGHTNING_CHANCE_WITHIN_SUPER = 0.35;
 
 let pipes = [];
 const pipeWidth = 60;
@@ -145,6 +231,9 @@ const BUILDING_PALETTES = [
 ];
 
 const skyline = [];
+const SKYLINE_PARALLAX = 0.35;
+let bgOffsetX = 0;
+let skylineTileWidth = 0;
 
 function generateSkyline() {
     skyline.length = 0;
@@ -155,23 +244,121 @@ function generateSkyline() {
         skyline.push({ x, w, h });
         x += w + 5;
     }
+    skylineTileWidth = x;
 }
 generateSkyline();
 
-// Rainbow hue for invincibility aura
 let rainbowHue = 0;
+
+/* ============================
+   SCORE POPUPS
+   ============================ */
+let scorePopups = [];
+const POPUP_LIFETIME = 50;
+const POPUP_RISE_DISTANCE = 40;
+
+const POPUP_LABEL_COLORS = {
+    Junk: '#ffb84d',
+    Lightning: '#fff066',
+    Rebirth: '#ffffff',
+    Star: null
+};
+
+function spawnScorePopup(x, y, value, label, multiplierDelta) {
+    scorePopups.push({
+        x,
+        y,
+        value: Math.round(value),
+        label,
+        multiplierDelta,
+        age: 0
+    });
+}
+
+function updateScorePopups(delta) {
+    for (let i = scorePopups.length - 1; i >= 0; i--) {
+        const p = scorePopups[i];
+        p.age += delta;
+        if (p.age >= POPUP_LIFETIME) {
+            scorePopups.splice(i, 1);
+        }
+    }
+}
+
+function drawScorePopups() {
+    scorePopups.forEach(p => {
+        const progress = Math.min(1, p.age / POPUP_LIFETIME);
+        const alpha = 1 - progress;
+        const riseY = p.y - progress * POPUP_RISE_DISTANCE;
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+
+        const valueColor = p.value > 0 ? '#7CFC00' : (p.value < 0 ? '#ff5c5c' : '#ffffff');
+        const sign = p.value > 0 ? '+' : '';
+        ctx.fillStyle = valueColor;
+        ctx.font = 'bold 18px Arial';
+        ctx.fillText(`${sign}${p.value}`, p.x, riseY - 18);
+
+        let labelColor = POPUP_LABEL_COLORS[p.label];
+        if (p.label === 'Star') {
+            labelColor = `hsl(${rainbowHue}, 100%, 70%)`;
+        }
+        ctx.fillStyle = labelColor || '#ffffff';
+        ctx.font = 'bold 12px Arial';
+        ctx.fillText(p.label, p.x, riseY - 4);
+
+        if (p.multiplierDelta) {
+            const mSign = p.multiplierDelta > 0 ? '+' : '-';
+            ctx.fillStyle = p.multiplierDelta > 0 ? '#7CFC00' : '#ff5c5c';
+            ctx.font = 'bold 11px Arial';
+            ctx.fillText(`${mSign}x${Math.abs(p.multiplierDelta).toFixed(2)}`, p.x, riseY + 11);
+        }
+
+        ctx.restore();
+    });
+}
 
 function applyMultiplierChange(effect) {
     if (effect === 'grow') {
         multiplier += MULTIPLIER_STEP;
-    } else if (effect === 'shrink') {
-        if (multiplier == 1.0) {
-            multiplier = 1.0;
-        }
-        multiplier = Math.max(MULTIPLIER_MIN, multiplier - MULTIPLIER_STEP);
     }
-    multiplier = Math.round(multiplier * 10) / 10; // avoid float drift
-    setText(multiplierEl, `Food Multiplier: x${multiplier.toFixed(1)}`);
+    multiplier = Math.round(multiplier / MULTIPLIER_STEP) * MULTIPLIER_STEP;
+    multiplier = Math.round(multiplier * 100) / 100;
+    setText(multiplierEl, `Food Multiplier: x${multiplier.toFixed(2)}`);
+}
+
+function awardScore(amount) {
+    score += amount;
+    setText(scoreEl, Math.round(score));
+    checkRebirth();
+}
+
+function checkRebirth() {
+    let safety = 0;
+    while (score >= rebirthThreshold) {
+        triggerRebirth(bird.x, bird.y - bird.size / 2 - 10);
+        rebirthThreshold += REBIRTH_SCORE_INTERVAL;
+        safety++;
+        if (safety >= REBIRTH_SAFETY_CAP) break;
+    }
+}
+
+function triggerRebirth(x, y) {
+    bird.size = bird.baseSize;
+    multiplier = 1.0;
+    rebirthCount++;
+    setText(multiplierEl, `Food Multiplier: x${multiplier.toFixed(2)}`);
+    setText(rebirthEl, `Rebirths: ${rebirthCount}`);
+
+    const bonus = REBIRTH_BONUS_POINTS * multiplier;
+    score += bonus;
+    setText(scoreEl, Math.round(score));
+    spawnScorePopup(x, y, bonus, 'Rebirth', 0);
+    AudioEngine.rebirth();
+    triggerBounce(1.2);
 }
 
 function resetGame() {
@@ -186,23 +373,33 @@ function resetGame() {
     bird.superType = null;
     bird.lightningPipesRemaining = 0;
     pipes = [];
+    scorePopups = [];
     score = 0;
     fedCount = 0;
+    rebirthCount = 0;
+    rebirthThreshold = REBIRTH_SCORE_INTERVAL;
     multiplier = 1.0;
     pipeSpawnTimer = 0;
+    bgOffsetX = 0;
     setText(scoreEl, score);
     setText(fedEl, `Food Eaten: ${fedCount}`);
-    setText(multiplierEl, `Food Multiplier: x${multiplier.toFixed(1)}`);
+    setText(multiplierEl, `Food Multiplier: x${multiplier.toFixed(2)}`);
+    setText(rebirthEl, `Rebirths: ${rebirthCount}`);
 }
 
 function triggerBounce(intensity = 1) {
-    // Squash effect: flatten then spring back
     bird.squashX = 1 + 0.35 * intensity;
     bird.squashY = 1 - 0.35 * intensity;
 }
 
 function flap() {
     if (gameState === 'start') {
+        currentPlayerName = (playerNameInput && playerNameInput.value.trim()) || 'Anonymous';
+        try {
+            localStorage.setItem(LAST_NAME_KEY, currentPlayerName);
+        } catch (e) {
+            // ignore — not critical
+        }
         gameState = 'playing';
         startScreen.classList.add('hidden');
         resetGame();
@@ -214,36 +411,29 @@ function flap() {
         bird.squashY = 1.15;
         AudioEngine.flap();
     } else if (gameState === 'gameover') {
-        gameState = 'playing';
+        // Return to the intro screen (with the just-updated leaderboard) first,
+        // rather than restarting instantly — a second tap/space then begins
+        // the next run. See the message above this code for the tradeoff.
+        gameState = 'start';
         gameOverScreen.classList.add('hidden');
-        resetGame();
-        bird.velocity = bird.jumpStrength;
-        AudioEngine.start();
+        renderLeaderboard();
+        startScreen.classList.remove('hidden');
     }
 }
 
 document.addEventListener('keydown', (e) => {
+    if (document.activeElement === playerNameInput) return; // let typing (incl. spaces) work normally
     if (e.code === 'Space') {
         e.preventDefault();
         flap();
     }
 });
 
-/*document.addEventListener('click', (e) => {
-e.preventDefault();
-flap();
-});*/
-
 document.addEventListener('pointerdown', (e) => {
+    if (e.target === playerNameInput) return; // let the player tap/focus the name field
     e.preventDefault();
     flap();
 });
-
-/*canvas.addEventListener('click', flap);
-canvas.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    flap();
-});*/
 
 function spawnPipe() {
     const minTop = 50;
@@ -262,7 +452,6 @@ function spawnPipe() {
         foodDef = FOOD_TYPES[Math.floor(Math.random() * FOOD_TYPES.length)];
     }
 
-    // Decide if this building pair moves vertically (only once score is high enough)
     const canMove = score >= MOVING_BUILDING_SCORE_MIN && Math.random() < 0.35;
     const moveRange = 40 + Math.random() * 30;
     const moveSpeed = 0.02 + Math.random() * 0.02;
@@ -297,7 +486,7 @@ function updateBird(delta) {
     bird.squashY += (1 - bird.squashY) * 0.2;
 
     if (bird.invincible) {
-        bird.invincibleTimer -= delta; // was --
+        bird.invincibleTimer -= delta;
         if (bird.invincibleTimer <= 0) {
             bird.invincible = false;
             bird.superType = null;
@@ -308,7 +497,7 @@ function updateBird(delta) {
     if (bird.y + bird.size / 2 > CANVAS_H) {
         bird.y = CANVAS_H - bird.size / 2;
         triggerBounce(1.5);
-        AudioEngine.bounce();
+        AudioEngine.dieGround();
         endGame();
     }
     if (bird.y - bird.size / 2 < 0) {
@@ -323,8 +512,9 @@ function updatePipes(delta) {
     const lightningBoost = bird.invincible && bird.superType === 'lightning';
     const effectiveSpawnInterval = lightningBoost ? LIGHTNING_SPAWN_INTERVAL : pipeSpawnInterval;
     const effectiveSpeed = lightningBoost ? pipeSpeed * SPEED_BOOST_MULTIPLIER : pipeSpeed;
+    bgOffsetX += effectiveSpeed * delta;
 
-    pipeSpawnTimer += delta; // was ++
+    pipeSpawnTimer += delta;
     if (pipeSpawnTimer >= effectiveSpawnInterval) {
         spawnPipe();
         pipeSpawnTimer = 0;
@@ -334,7 +524,6 @@ function updatePipes(delta) {
         const pipe = pipes[i];
         pipe.x -= effectiveSpeed * delta;
 
-        // Vertical movement for special buildings
         if (pipe.moving) {
             pipe.movePhase += pipe.moveSpeed * delta;
             const offset = Math.sin(pipe.movePhase) * pipe.moveRange;
@@ -342,11 +531,9 @@ function updatePipes(delta) {
             pipe.bottomY = pipe.topHeight + pipeGap;
         }
 
-        // Normal pipe-pass scoring — unaffected by lightning; that bonus lives in the food block below
         if (!pipe.passed && pipe.x + pipeWidth < bird.x) {
             pipe.passed = true;
-            score += 1 * multiplier;
-            setText(scoreEl, Math.round(score));
+            awardScore(1 * multiplier);
             AudioEngine.score();
         }
 
@@ -361,7 +548,7 @@ function updatePipes(delta) {
         if (!bird.invincible && birdRight > pipeLeft && birdLeft < pipeRight) {
             if (birdTop < pipe.topHeight || birdBottom > pipe.bottomY) {
                 triggerBounce(1.5);
-                AudioEngine.hit();
+                AudioEngine.dieBuilding();
                 endGame();
             }
         }
@@ -378,41 +565,45 @@ function updatePipes(delta) {
                 setText(fedEl, `Food Eaten: ${fedCount}`);
                 triggerBounce(0.6);
 
-                // Lightning bonus: only fires on an ACTUAL collision (Flaffy has to fly into it),
-                // capped at LIGHTNING_GUARANTEED_PIPES hits per lightning window — that cap is the
-                // maximum raw points obtainable, not a guaranteed auto-hit. Any food type counts,
-                // including a star hit while lightning is active.
+                const multiplierAtHit = multiplier;
+                let rawPoints = FOOD_BASE_POINTS;
+                let popupLabel = '';
+                let multiplierDelta = 0;
+
                 if (bird.invincible && bird.superType === 'lightning' && bird.lightningPipesRemaining > 0) {
-                    const rawPoints = (pipe.food.effect === 'shrink') ? -LIGHTNING_BONUS_POINTS : LIGHTNING_BONUS_POINTS;
-                    if (rawPoints * multiplier >= 0) {
-                        score += rawPoints * multiplier;
-                    }
-                    setText(scoreEl, Math.round(score));
+                    rawPoints += LIGHTNING_BONUS_POINTS;
                     bird.lightningPipesRemaining--;
                 }
 
                 if (pipe.food.effect === 'grow') {
                     bird.size = Math.min(MAX_BIRD_SIZE, bird.size + GROW_AMOUNT);
+                    const before = multiplier;
                     applyMultiplierChange('grow');
+                    multiplierDelta = Math.round((multiplier - before) * 100) / 100;
+                    popupLabel = 'Junk';
                     AudioEngine.eatGrow();
-                } else if (pipe.food.effect === 'shrink') {
-                    bird.size = Math.max(MIN_BIRD_SIZE, bird.size - SHRINK_AMOUNT);
-                    applyMultiplierChange('shrink');
-                    AudioEngine.eatShrink();
                 } else if (pipe.food.effect === 'super') {
                     bird.invincible = true;
                     bird.invincibleTimer = INVINCIBLE_DURATION;
                     if (pipe.food.superType === 'lightning') {
                         bird.superType = 'lightning';
                         bird.lightningPipesRemaining = LIGHTNING_GUARANTEED_PIPES;
+                        popupLabel = 'Lightning';
                         AudioEngine.eatLightning();
                     } else {
                         bird.superType = 'star';
                         bird.size = Math.min(MAX_BIRD_SIZE, bird.size + SUPER_GROW_AMOUNT);
-                        applyMultiplierChange('grow'); // star counts as junk food too
+                        const before = multiplier;
+                        applyMultiplierChange('grow');
+                        multiplierDelta = Math.round((multiplier - before) * 100) / 100;
+                        popupLabel = 'Star';
                         AudioEngine.eatSuper();
                     }
                 }
+
+                const pointsAwarded = rawPoints * multiplierAtHit;
+                awardScore(pointsAwarded);
+                spawnScorePopup(foodX, foodY, pointsAwarded, popupLabel, multiplierDelta);
             }
         }
 
@@ -427,8 +618,8 @@ function endGame() {
     gameState = 'gameover';
     const finalScoreValue = Math.round(score);
     bestScore = Math.max(bestScore, finalScoreValue);
-    setText(finalScoreEl, `Building Score: ${finalScoreValue} | Best: ${bestScore} | Food Eaten: ${fedCount}`);
-    //setText(finalScoreEl, `Score: ${finalScoreValue}  |  Best: ${bestScore}`);
+    updateLeaderboard(currentPlayerName, finalScoreValue, rebirthCount);
+    setText(finalScoreEl, `Building Score: ${finalScoreValue} | Best: ${bestScore} | Food Eaten: ${fedCount} | Rebirths: ${rebirthCount}`);
     gameOverScreen.classList.remove('hidden');
 }
 
@@ -451,7 +642,6 @@ function drawBird() {
     ctx.rotate((bird.rotation * Math.PI) / 180);
     ctx.scale(bird.squashX, bird.squashY);
 
-    // Invincibility aura (rainbow, shared visual language for any active power-up)
     if (bird.invincible) {
         rainbowHue = (rainbowHue + 4) % 360;
         const auraRadius = bird.size / 2 + 10;
@@ -465,13 +655,11 @@ function drawBird() {
         ctx.fill();
     }
 
-    // Body (grey/yellow shiny gradient during lightning, gold otherwise)
     ctx.fillStyle = getBirdBodyStyle();
     ctx.beginPath();
     ctx.ellipse(0, 0, bird.size / 2, bird.size / 2 - 2, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Shine sweep across the body while lightning is active
     if (bird.invincible && bird.superType === 'lightning') {
         ctx.save();
         ctx.beginPath();
@@ -502,6 +690,34 @@ function drawBird() {
     ctx.beginPath();
     ctx.arc(bird.size * 0.33, -bird.size * 0.17, bird.size * 0.1, 0, Math.PI * 2);
     ctx.fill();
+
+    const glassesR = bird.size * 0.22;
+    const glassesX = bird.size * 0.3;
+    const glassesY = -bird.size * 0.17;
+    ctx.strokeStyle = '#2b2b2b';
+    ctx.lineWidth = Math.max(1.5, bird.size * 0.045);
+    ctx.beginPath();
+    ctx.arc(glassesX, glassesY, glassesR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(glassesX - glassesR, glassesY);
+    ctx.lineTo(glassesX - glassesR - bird.size * 0.14, glassesY - bird.size * 0.03);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.beginPath();
+    ctx.arc(glassesX + glassesR * 0.3, glassesY - glassesR * 0.3, glassesR * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#5a3824';
+    ctx.lineWidth = Math.max(1.5, bird.size * 0.09);
+    ctx.lineCap = 'round';
+    for (let k = 0; k < 3; k++) {
+        const hx = -bird.size * 0.12 - k * bird.size * 0.14;
+        const hy = -bird.size * 0.42 - Math.sin(k * 1.4) * bird.size * 0.04;
+        ctx.beginPath();
+        ctx.arc(hx, hy, bird.size * 0.1, Math.PI * 0.15, Math.PI * 1.85);
+        ctx.stroke();
+    }
 
     ctx.fillStyle = '#ff6b35';
     ctx.beginPath();
@@ -604,10 +820,16 @@ function drawSunsetSky() {
 }
 
 function drawSkyline() {
+    const scrollX = ((bgOffsetX * SKYLINE_PARALLAX) % skylineTileWidth + skylineTileWidth) % skylineTileWidth;
     ctx.fillStyle = 'rgba(30, 20, 45, 0.55)';
-    skyline.forEach(b => {
-        ctx.fillRect(b.x, CANVAS_H - b.h - 10, b.w, b.h);
-    });
+    for (let pass = -1; pass <= 1; pass++) {
+        const baseX = pass * skylineTileWidth - scrollX;
+        skyline.forEach(b => {
+            const bx = b.x + baseX;
+            if (bx + b.w < 0 || bx > CANVAS_W) return;
+            ctx.fillRect(bx, CANVAS_H - b.h - 10, b.w, b.h);
+        });
+    }
 }
 
 function draw() {
@@ -629,20 +851,33 @@ function draw() {
             ctx.fillText('⭐ INVINCIBLE ⭐', CANVAS_W / 2, CANVAS_H - 25);
         }
     }
+
+    drawScorePopups();
 }
 
 let lastFrameTime = performance.now();
 
 function gameLoop(currentTime) {
-    const rawDelta = (currentTime - lastFrameTime) / (1000 / 60); // 1.0 == one 60fps frame's worth of real time
+    const rawDelta = (currentTime - lastFrameTime) / (1000 / 60);
     lastFrameTime = currentTime;
-    const delta = Math.min(rawDelta, 3); // clamp so a lag spike / tab-switch doesn't teleport the bird
+    const delta = Math.min(rawDelta, 3);
 
     if (gameState === 'playing') {
         updateBird(delta);
         updatePipes(delta);
+        updateScorePopups(delta);
     }
     draw();
     requestAnimationFrame(gameLoop);
 }
-requestAnimationFrame(gameLoop); // replaces the old bare gameLoop() call at the bottom of the file
+
+// Initial setup — prefill the last-used name and show whatever's already saved
+try {
+    const lastName = localStorage.getItem(LAST_NAME_KEY);
+    if (lastName && playerNameInput) playerNameInput.value = lastName;
+} catch (e) {
+    // ignore
+}
+renderLeaderboard();
+
+requestAnimationFrame(gameLoop);

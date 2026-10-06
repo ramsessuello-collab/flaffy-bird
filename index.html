@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <title>Flaffy Bird</title>
+    <link rel="icon" type="image/x-icon" href="assets/main-icon.ico">
     <link rel="stylesheet" href="styles.css">
 </head>
 
@@ -14,21 +15,29 @@
         <div id="score">0</div>
         <div id="fedCount">Food Eaten: 0</div>
         <div id="multiplier">x1.0</div>
+        <div id="rebirthCount">Rebirths: 0</div>
         <div id="startScreen">
             <h1>Flaffy Bird</h1>
             <h4>By: Ramses Benedict B. Suello</h4>
-            <h1></h1>
+            <div id="nameEntry">
+                <label for="playerNameInput">Your Name:</label>
+                <input type="text" id="playerNameInput" maxlength="15" placeholder="Enter your name" autocomplete="off">
+            </div>
             <p style="font-size: 16px; color:#ffe066;">Grow with Junk Food</p>
-            <p style="font-size: 16px; color:#ffe066;">Shrink with Healthy Food</p>
+            <p style="font-size: 16px; color:#ffe066;">Max out your size to Rebirth!</p>
             <p>Press Screen or Space to Flap</p>
+            <div id="leaderboard">
+                <h3>🏆 Leaderboard</h3>
+                <ol id="leaderboardList"></ol>
+            </div>
         </div>
         <div id="gameOverScreen" class="hidden">
             <h1>Game Over</h1>
             <p id="finalScore"></p>
-            <p>Press Screen or Space to Restart</p>
+            <p>Press Screen or Space to Continue</p>
         </div>
     </div>
-    <script src="script3.js"></script>
+    <script src="script2.js"></script>
 
 </body>
 
